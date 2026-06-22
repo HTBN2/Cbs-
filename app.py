@@ -16,6 +16,7 @@ import cv2
 import numpy as np
 from flask import Flask, request, jsonify
 from PIL import Image
+from db import check_token, increment_usage, get_usage
 
 # ── Logging ───────────────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -248,11 +249,27 @@ def add_cors(response):
     return response
 
 
+def verify_token():
+    """Check X-Token header. Returns (ok, error_response)."""
+    token = request.headers.get("X-Token", "").strip()
+    if not token:
+        return False, (jsonify({"error": "Missing X-Token header"}), 401)
+    allowed, reason = check_token(token)
+    if not allowed:
+        return False, (jsonify({"error": reason}), 403)
+    return True, token
+
+
 @app.route("/CamCap", methods=["POST", "OPTIONS"])
 def cam_cap():
     if request.method == "OPTIONS":
         return "", 204
     t0 = time.perf_counter()
+
+    # 0. Auth
+    ok, result = verify_token()
+    if not ok:
+        return result
 
     # 1. Parse JSON
     data = request.get_json(silent=True)
@@ -280,9 +297,24 @@ def cam_cap():
         log.exception("Inference error")
         return jsonify({"error": str(e)}), 500
 
+    token = request.headers.get("X-Token")
+    increment_usage(token)
     ms = (time.perf_counter() - t0) * 1000
-    log.info("solution=%s  total=%.1f ms", solution, ms)
+    log.info("solution=%s  token=%s  total=%.1f ms", solution, token[:8], ms)
     return jsonify({"solution": solution})
+
+
+@app.route("/usage", methods=["GET", "OPTIONS"])
+def usage():
+    if request.method == "OPTIONS":
+        return "", 204
+    token = request.headers.get("X-Token", "").strip()
+    if not token:
+        return jsonify({"error": "Missing X-Token header"}), 401
+    info = get_usage(token)
+    if not info:
+        return jsonify({"error": "Invalid token"}), 403
+    return jsonify(info)
 
 
 @app.route("/CamCapBatch", methods=["POST", "OPTIONS"])
@@ -290,6 +322,10 @@ def cam_cap_batch():
     if request.method == "OPTIONS":
         return "", 204
     t0 = time.perf_counter()
+
+    ok, result = verify_token()
+    if not ok:
+        return result
 
     data = request.get_json(silent=True)
     if not data:
@@ -317,8 +353,11 @@ def cam_cap_batch():
         log.exception("Batch inference error")
         return jsonify({"error": str(e)}), 500
 
+    token = request.headers.get("X-Token")
+    for _ in solutions:
+        increment_usage(token)
     ms = (time.perf_counter() - t0) * 1000
-    log.info("batch=%d  solutions=%s  total=%.1f ms", len(solutions), solutions, ms)
+    log.info("batch=%d  token=%s  total=%.1f ms", len(solutions), token[:8], ms)
     return jsonify({"solutions": solutions})
 
 
